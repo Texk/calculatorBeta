@@ -1,0 +1,754 @@
+import sys
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+import sympy as sp
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
+    QGridLayout, QMessageBox, QMenu, QAction, QToolButton, QSpacerItem, QSizePolicy
+)
+from PyQt5.QtGui import QIcon, QPalette, QColor, QFont
+from PyQt5.QtCore import Qt, QTranslator, QLocale, QSize
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+ELEMENTS = {
+    'H': 1.00794, 'He': 4.002602, 'Li': 6.941, 'Be': 9.012182, 'B': 10.811,
+    'C': 12.0107, 'N': 14.0067, 'O': 15.9994, 'F': 18.998403, 'Ne': 20.1797,
+    'Na': 22.989769, 'Mg': 24.305, 'Al': 26.981538, 'Si': 28.0855, 'P': 30.973762,
+    'S': 32.065, 'Cl': 35.453, 'K': 39.0983, 'Ca': 40.078, 'Fe': 55.845, 'Cu': 63.546
+}
+
+HISTORY_FILE = "STORY.txt"
+
+class ChemicalCalculator:
+    @staticmethod
+    def calculate_molar_mass(formula):
+        try:
+            def parse(formula):
+                tokens = re.findall(r'([A-Z][a-z]?|\d+|\(|\))', formula)
+                stack = [[]]
+                i = 0
+                while i < len(tokens):
+                    token = tokens[i]
+                    if token == '(':
+                        stack.append([])
+                    elif token == ')':
+                        group = stack.pop()
+                        count = 1
+                        if i+1 < len(tokens) and tokens[i+1].isdigit():
+                            count = int(tokens[i+1])
+                            i += 1
+                        stack[-1].extend(group * count)
+                    elif re.match(r'[A-Z][a-z]?$', token):
+                        elem = token
+                        cnt = 1
+                        if i+1 < len(tokens) and tokens[i+1].isdigit():
+                            cnt = int(tokens[i+1])
+                            i += 1
+                        stack[-1].extend([elem]*cnt)
+                    elif token.isdigit():
+                        pass
+                    i += 1
+                return stack[0]
+            elems = parse(formula)
+            counts = {}
+            for e in elems:
+                if e not in ELEMENTS:
+                    return None, f"Неизвестный элемент: {e}"
+                counts[e] = counts.get(e, 0) + 1
+            total_mass = sum(ELEMENTS[e]*counts[e] for e in counts)
+            details = " + ".join(f"{counts[e]}×{e}({ELEMENTS[e]})" for e in counts)
+            return total_mass, f"Молярная масса {formula}: {total_mass:.4f} г/моль ({details})"
+        except Exception as ex:
+            return None, f"Ошибка разбора формулы: {ex}"
+
+    @staticmethod
+    def parse_formula(formula):
+        def parse(formula):
+            tokens = re.findall(r'([A-Z][a-z]?|\d+|\(|\))', formula)
+            stack = [{}]
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if token == '(':
+                    stack.append({})
+                elif token == ')':
+                    group = stack.pop()
+                    count = 1
+                    if i+1 < len(tokens) and tokens[i+1].isdigit():
+                        count = int(tokens[i+1])
+                        i += 1
+                    for e in group:
+                        stack[-1][e] = stack[-1].get(e,0) + group[e]*count
+                elif re.match(r'[A-Z][a-z]?$', token):
+                    elem = token
+                    cnt = 1
+                    if i+1 < len(tokens) and tokens[i+1].isdigit():
+                        cnt = int(tokens[i+1])
+                        i += 1
+                    stack[-1][elem] = stack[-1].get(elem,0) + cnt
+                i += 1
+            return stack[0]
+        return parse(formula)
+
+    @staticmethod
+    def balance_equation(equation):
+        try:
+            reactants, products = equation.split('->')
+            reactants = [x.strip() for x in reactants.split('+')]
+            products = [x.strip() for x in products.split('+')]
+            all_formulas = reactants + products
+            elems = set()
+            for f in all_formulas:
+                elems.update(ChemicalCalculator.parse_formula(f).keys())
+            elems = sorted(list(elems))
+            import sympy as sp
+            n = len(all_formulas)
+            m = len(elems)
+            A = []
+            for el in elems:
+                row = []
+                for f in reactants:
+                    row.append(ChemicalCalculator.parse_formula(f).get(el,0))
+                for f in products:
+                    row.append(-ChemicalCalculator.parse_formula(f).get(el,0))
+                A.append(row)
+            A = sp.Matrix(A)
+            sol = A.nullspace()
+            if not sol:
+                return None, "Не удалось сбалансировать уравнение"
+            coeffs = sol[0]
+            lcm = sp.lcm([i.q for i in coeffs])
+            ints = [abs(int(i*lcm)) for i in coeffs]
+            out = []
+            for i, f in enumerate(all_formulas):
+                c = ints[i]
+                if c==1:
+                    out.append(f)
+                else:
+                    out.append(f"{c}{f}")
+            balanced = " + ".join(out[:len(reactants)]) + " → " + " + ".join(out[len(reactants):])
+            return balanced, f"Сбалансированное уравнение: {balanced}"
+        except Exception as e:
+            return None, f"Ошибка балансировки: {str(e)}"
+
+class MathCalculator:
+    @staticmethod
+    def calculate_expression(expression):
+        try:
+            expression = re.sub(r'(\d)([a-zA-Zа-яА-Я_])', r'\1*\2', expression)
+            expression = re.sub(r'([a-zA-Zа-яА-Я_][a-zA-Zа-яА-Я_0-9]*)\s*\(', r'\1*(', expression)
+            expr = sp.sympify(expression)
+            result = expr.evalf()
+            return result, f"{expression} = {result}"
+        except Exception as e:
+            return None, f"Ошибка: {str(e)}"
+    
+    @staticmethod
+    def solve_equation(equation, var='x'):
+        try:
+            equation = re.sub(r'([a-zA-Zа-яА-Я_][a-zA-Zа-яА-Я_0-9]*)\s*\(', r'\1*(', equation)
+            equation = re.sub(r'(\d)([a-zA-Zа-яА-Я_])', r'\1*\2', equation)
+
+            found_vars = list(set(re.findall(r'[a-zA-Zа-яА-Я_]', equation)))
+            filtered = [v for v in found_vars if v not in ['e', 'i', 'E']]
+            if not filtered:
+                var = 'x'
+            elif var == 'x' and filtered:
+                var = filtered[0]
+
+            sym = sp.symbols(var)
+
+            if '=' in equation:
+                lhs, rhs = equation.split('=')
+                lhs_expr = sp.sympify(lhs)
+                rhs_expr = sp.sympify(rhs)
+                eq = sp.Eq(lhs_expr, rhs_expr)
+            else:
+                eq = sp.sympify(equation)
+
+            solutions = sp.solve(eq, sym)
+            return solutions, f"Решения уравнения {equation}: {solutions}"
+        except Exception as e:
+            return None, f"Ошибка: {str(e)}"
+    
+    @staticmethod
+    def calculate_derivative(expression, var='x'):
+        try:
+            expression = re.sub(r'(\d)([a-zA-Zа-яА-Я_])', r'\1*\2', expression)
+            expression = re.sub(r'([a-zA-Zа-яА-Я_][a-zA-Zа-яА-Я_0-9]*)\s*\(', r'\1*(', expression)
+            x = sp.symbols(var)
+            expr = sp.sympify(expression)
+            derivative = sp.diff(expr, x)
+            return derivative, f"Производная d({expression})/d{var} = {derivative}"
+        except Exception as e:
+            return None, f"Ошибка: {str(e)}"
+    
+    @staticmethod
+    def calculate_integral(expression, var='x'):
+        try:
+            expression = re.sub(r'(\d)([a-zA-Zа-яА-Я_])', r'\1*\2', expression)
+            expression = re.sub(r'([a-zA-Zа-яА-Я_][a-zA-Zа-яА-Я_0-9]*)\s*\(', r'\1*(', expression)
+            x = sp.symbols(var)
+            expr = sp.sympify(expression)
+            integral = sp.integrate(expr, x)
+            return integral, f"Интеграл ∫({expression})d{var} = {integral}"
+        except Exception as e:
+            return None, f"Ошибка: {str(e)}"
+
+    @staticmethod
+    def solve_math_problem(problem_text):
+        try:
+            pattern = re.compile(r'(найти|решить|решите|реши|find|solve)[^:]*:\s*([0-9xXyYzZ\+\-\*/\^\=\(\) ]+)', re.IGNORECASE)
+            match = pattern.search(problem_text)
+            if match:
+                expr = match.group(2).strip()
+                if '=' in expr:
+                    return MathCalculator.solve_equation(expr)
+                else:
+                    return MathCalculator.calculate_expression(expr)
+            eq_match = re.search(r'([0-9xXyYzZ\+\-\*/\^\=\(\) ]+=+[0-9xXyYzZ\+\-\*/\^\=\(\) ]+)', problem_text)
+            if eq_match:
+                return MathCalculator.solve_equation(eq_match.group(1).strip())
+            expr_match = re.search(r'([0-9xXyYzZ\+\-\*/\^\(\) ]+)', problem_text)
+            if expr_match:
+                return MathCalculator.calculate_expression(expr_match.group(1).strip())
+            return MathCalculator.calculate_expression(problem_text)
+        except Exception as e:
+            return None, f"Не удалось решить задачу: {str(e)}"
+
+class GraphingCalculator(FigureCanvas):
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        super().__init__(self.fig)
+        self.setParent(parent)
+        self.ax = self.fig.add_subplot(111)
+    
+    def plot_function(self, function_str, x_range=(-10, 10), num_points=500):
+        try:
+            function_str = re.sub(r'(\d)([a-zA-Zа-яА-Я_])', r'\1*\2', function_str)
+            function_str = re.sub(r'([a-zA-Zа-яА-Я_][a-zA-Zа-яА-Я_0-9]*)\s*\(', r'\1*(', function_str)
+            
+            self.ax.clear()
+            x = sp.symbols('x')
+            expr = sp.sympify(function_str)
+            f = sp.lambdify(x, expr, 'numpy')
+            x_vals = np.linspace(x_range[0], x_range[1], num_points)
+            y_vals = f(x_vals)
+            self.ax.plot(x_vals, y_vals, 'b-', linewidth=2)
+            self.ax.set_title(f'График функции: {function_str}', fontsize=12)
+            self.ax.set_xlabel('x', fontsize=11)
+            self.ax.set_ylabel('f(x)', fontsize=11)
+            self.ax.grid(True, linestyle='--', alpha=0.6)
+            self.ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+            self.ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+            self.fig.tight_layout()
+            self.draw()
+            return True, "График построен успешно!"
+        except Exception as e:
+            return False, f"Ошибка: {str(e)}"
+
+class CalculatorApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Универсальный научный калькулятор")
+        self.setGeometry(100, 100, 900, 700)
+        self.translator = None
+
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1e1e2f;
+            }
+            QWidget {
+                background-color: #23233a;
+                color: #e3e3f7;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 14px;
+            }
+            QLineEdit, QTextEdit {
+                background-color: #23233a;
+                border: 1px solid #555575;
+                border-radius: 8px;
+                padding: 4px 8px;
+                color: #e3e3f7;
+            }
+            QPushButton {
+                background-color: #5468ff;
+                color: #ffffff;
+                border-radius: 8px;
+                padding: 7px 22px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #4051b5;
+            }
+            QGroupBox {
+                border: 1px solid #3c3c50;
+                border-radius: 8px;
+                margin-top: 0px;
+                margin-bottom: 16px;
+                font-weight: bold;
+                font-size: 15px;
+                color: #90caf9;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+            QTabWidget::pane {
+                border: 2px solid #3c3c50;
+                border-radius: 10px;
+                margin: 4px;
+            }
+            QTabBar::tab {
+                background: #23233a;
+                color: #90caf9;
+                border: 1px solid #3c3c50;
+                padding: 8px 16px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-size: 14px;
+                min-width: 120px;
+            }
+            QTabBar::tab:selected {
+                background: #5468ff;
+                color: #fff;
+            }
+            QToolButton {
+                background: #23233a;
+                border: none;
+                color: #90caf9;
+            }
+            QMenu {
+                background: #23233a;
+                color: #e3e3f7;
+                border: 1px solid #3c3c50;
+            }
+            QMessageBox {
+                background: #23233a;
+            }
+        """)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        header_layout = QHBoxLayout()
+        self.title_label = QLabel("Универсальный научный калькулятор")
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 22px; color:#90caf9; margin-bottom:8px;")
+        self.title_label.setFont(QFont('Segoe UI', 20, QFont.Bold))
+        header_layout.addWidget(self.title_label)
+
+        self.menu_button = QToolButton()
+        self.menu_button.setText("≡")
+        self.menu_button.setStyleSheet("font-size: 22px; font-weight: bold; background:#23233a; color:#90caf9;")
+        self.menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu()
+        self.feedback_action = menu.addAction("Обратная связь")
+        self.feedback_action.triggered.connect(self.show_feedback_dialog)
+        self.export_history_action = menu.addAction("Экспорт истории")
+        self.export_history_action.triggered.connect(self.export_history)
+        self.lang_ru_action = QAction("Русский", self)
+        self.lang_en_action = QAction("English", self)
+        self.lang_ru_action.triggered.connect(lambda: self.set_language('ru'))
+        self.lang_en_action.triggered.connect(lambda: self.set_language('en'))
+        menu.addAction(self.lang_ru_action)
+        menu.addAction(self.lang_en_action)
+        self.darkmode_action = QAction("Темный режим", self)
+        self.darkmode_action.setCheckable(True)
+        self.darkmode_action.triggered.connect(self.toggle_dark_mode)
+        menu.addAction(self.darkmode_action)
+        self.menu_button.setMenu(menu)
+
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.menu_button)
+        main_layout.addLayout(header_layout)
+
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+
+        self.history = []
+        self.history_text = QTextEdit()
+        self.history_text.setReadOnly(True)
+        self.load_history()
+
+        self.create_math_tab()
+        self.create_chemistry_tab()
+        self.create_graphing_tab()
+        self.create_history_tab()
+        self.status_bar = self.statusBar()
+        self.status_bar.setStyleSheet("background:#23233a; color:#90caf9; font-size:13px;")
+
+        self.current_language = 'ru'
+        self.dark_mode = True
+
+    def set_language(self, lang):
+        pass
+
+    def toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+
+    def load_history(self):
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    self.history = [line.strip() for line in f.readlines()]
+                    self.history_text.setText("\n".join(self.history))
+            else:
+                self.history = []
+        except Exception as e:
+            self.history = []
+
+    def save_history(self):
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                f.write("\n".join(self.history))
+        except Exception as e:
+            pass
+
+    def export_history(self):
+        self.save_history()
+        title = "Экспорт истории"
+        msg = f"История операций сохранена в файл:\n{HISTORY_FILE}"
+        QMessageBox.information(self, title, msg, QMessageBox.Ok)
+
+    def show_feedback_dialog(self):
+        msg = "Есть пожелания или встретили баги?\nПишите нам на почту: texkcompanu@gmail.com"
+        title = "Обратная связь"
+        QMessageBox.information(self, title, msg, QMessageBox.Ok)
+
+    def create_math_tab(self):
+        math_tab = QWidget()
+        layout = QVBoxLayout(math_tab)
+
+        # --- Блок с голубым заголовком поднят выше ---
+        expr_group = QGroupBox("Базовые математические операции")
+        expr_group.setStyleSheet("QGroupBox {margin-top: 0px; margin-bottom: 12px;}")
+        expr_layout = QGridLayout(expr_group)
+        expr_layout.setColumnStretch(1, 1)
+        expr_layout.setColumnMinimumWidth(1, 220)
+        expr_layout.setHorizontalSpacing(8)
+        expr_layout.setVerticalSpacing(8)
+
+        self.math_expr_label = QLabel("Выражение:")
+        expr_layout.addWidget(self.math_expr_label, 0, 0)
+        self.math_expr_input = QLineEdit()
+        self.math_expr_input.setPlaceholderText("Например: 2 + 2 * (3^2)")
+        expr_layout.addWidget(self.math_expr_input, 0, 1)
+        self.math_calculate_btn = QPushButton("Вычислить")
+        self.math_calculate_btn.setFixedHeight(32)
+        self.math_calculate_btn.setMinimumWidth(110)
+        self.math_calculate_btn.clicked.connect(self.calculate_expression)
+        expr_layout.addWidget(self.math_calculate_btn, 0, 2)
+
+        self.eq_label = QLabel("Уравнение:")
+        expr_layout.addWidget(self.eq_label, 1, 0)
+        self.equation_input = QLineEdit()
+        self.equation_input.setPlaceholderText("Например: x^2 - 4 = 0")
+        expr_layout.addWidget(self.equation_input, 1, 1)
+        self.var_label = QLabel("Переменная:")
+        expr_layout.addWidget(self.var_label, 1, 2)
+        self.var_input = QLineEdit("x")
+        self.var_input.setMaximumWidth(50)
+        expr_layout.addWidget(self.var_input, 1, 3)
+        self.solve_btn = QPushButton("Решить")
+        self.solve_btn.setFixedHeight(32)
+        self.solve_btn.setMinimumWidth(100)
+        self.solve_btn.clicked.connect(self.solve_equation)
+        expr_layout.addWidget(self.solve_btn, 1, 4)
+
+        self.func_label = QLabel("Функция:")
+        expr_layout.addWidget(self.func_label, 2, 0)
+        self.func_input = QLineEdit()
+        self.func_input.setPlaceholderText("Например: sin(x)*x^2")
+        expr_layout.addWidget(self.func_input, 2, 1)
+        self.deriv_var_label = QLabel("Переменная:")
+        expr_layout.addWidget(self.deriv_var_label, 2, 2)
+        self.deriv_var_input = QLineEdit("x")
+        self.deriv_var_input.setMaximumWidth(50)
+        expr_layout.addWidget(self.deriv_var_input, 2, 3)
+        self.derivative_btn = QPushButton("Производная")
+        self.derivative_btn.setFixedHeight(32)
+        self.derivative_btn.setMinimumWidth(110)
+        self.derivative_btn.clicked.connect(self.calculate_derivative)
+        expr_layout.addWidget(self.derivative_btn, 2, 4)
+        self.integral_btn = QPushButton("Интеграл")
+        self.integral_btn.setFixedHeight(32)
+        self.integral_btn.setMinimumWidth(110)
+        self.integral_btn.clicked.connect(self.calculate_integral)
+        expr_layout.addWidget(self.integral_btn, 2, 5)
+
+        layout.addWidget(expr_group)
+
+        # --- Блок "Решение математических задач" сразу после ---
+        problem_group = QGroupBox("Решение математических задач")
+        problem_group.setStyleSheet("QGroupBox {margin-top: 0px; margin-bottom: 8px;}")  # поднять выше
+        problem_layout = QHBoxLayout(problem_group)
+        self.problem_label = QLabel("Текст задачи:")
+        problem_layout.addWidget(self.problem_label, 0)
+        self.problem_input = QLineEdit()
+        self.problem_input.setPlaceholderText("Например: Найти x: 2x+8=16")
+        problem_layout.addWidget(self.problem_input, 4)
+        self.solve_problem_btn = QPushButton("Решить задачу")
+        self.solve_problem_btn.setFixedHeight(36)
+        self.solve_problem_btn.setMinimumWidth(140)
+        self.solve_problem_btn.setStyleSheet("background-color:#42be6a; color:#fff; font-weight:bold;")
+        self.solve_problem_btn.clicked.connect(self.solve_math_problem)
+        problem_layout.addWidget(self.solve_problem_btn, 0)
+        layout.addWidget(problem_group)
+
+        self.math_result = QTextEdit()
+        self.math_result.setReadOnly(True)
+        self.math_result.setMinimumHeight(110)
+        self.math_result.setStyleSheet("background:#202030; border:1px solid #3c3c50; border-radius:6px; color:#e3e3f7; font-size:14px;")
+        layout.addWidget(self.math_result)
+        self.tabs.addTab(math_tab, "Математика")
+
+    def create_chemistry_tab(self):
+        chem_tab = QWidget()
+        layout = QVBoxLayout(chem_tab)
+        chem_group = QGroupBox("Химические расчёты и балансировка")
+        chem_group.setStyleSheet("QGroupBox {margin-top: 0px; margin-bottom: 8px;}")
+        chem_layout = QGridLayout(chem_group)
+        chem_layout.setColumnStretch(1, 1)
+        chem_layout.setColumnMinimumWidth(1, 220)
+        chem_layout.setHorizontalSpacing(8)
+        chem_layout.setVerticalSpacing(8)
+        self.chem_formula_label = QLabel("Химическая формула:")
+        chem_layout.addWidget(self.chem_formula_label, 0, 0)
+        self.formula_input = QLineEdit()
+        self.formula_input.setPlaceholderText("Например: H2SO4")
+        chem_layout.addWidget(self.formula_input, 0, 1)
+        self.molar_mass_btn = QPushButton("Молярная масса")
+        self.molar_mass_btn.setFixedHeight(32)
+        self.molar_mass_btn.setMinimumWidth(120)
+        self.molar_mass_btn.clicked.connect(self.calculate_molar_mass)
+        chem_layout.addWidget(self.molar_mass_btn, 0, 2)
+        self.chem_eq_label = QLabel("Химическое уравнение:")
+        chem_layout.addWidget(self.chem_eq_label, 1, 0)
+        self.equation_input_chem = QLineEdit()
+        self.equation_input_chem.setPlaceholderText("Например: H2 + O2 -> H2O")
+        chem_layout.addWidget(self.equation_input_chem, 1, 1)
+        self.balance_btn = QPushButton("Балансировать")
+        self.balance_btn.setFixedHeight(32)
+        self.balance_btn.setMinimumWidth(120)
+        self.balance_btn.clicked.connect(self.balance_equation)
+        chem_layout.addWidget(self.balance_btn, 1, 2)
+        layout.addWidget(chem_group)
+        self.chem_result = QTextEdit()
+        self.chem_result.setReadOnly(True)
+        self.chem_result.setMinimumHeight(110)
+        self.chem_result.setStyleSheet("background:#202030; border:1px solid #3c3c50; border-radius:6px; color:#e3e3f7; font-size:14px;")
+        layout.addWidget(self.chem_result)
+        self.tabs.addTab(chem_tab, "Химия")
+
+    def create_graphing_tab(self):
+        graph_tab = QWidget()
+        layout = QVBoxLayout(graph_tab)
+        control_group = QGroupBox("Построение графиков")
+        control_group.setStyleSheet("QGroupBox {margin-top: 0px; margin-bottom: 8px;}")
+        control_layout = QGridLayout(control_group)
+        control_layout.setColumnStretch(1, 1)
+        control_layout.setColumnMinimumWidth(1, 200)
+        control_layout.setHorizontalSpacing(8)
+        control_layout.setVerticalSpacing(8)
+        self.graph_func_label = QLabel("Функция f(x):")
+        control_layout.addWidget(self.graph_func_label, 0, 0)
+        self.func_input_graph = QLineEdit("sin(x)")
+        self.func_input_graph.setPlaceholderText("например: sin(x)*x^2")
+        control_layout.addWidget(self.func_input_graph, 0, 1)
+        self.xmin_label = QLabel("X min:")
+        control_layout.addWidget(self.xmin_label, 1, 0)
+        self.xmin_input = QLineEdit("-10")
+        control_layout.addWidget(self.xmin_input, 1, 1)
+        self.xmax_label = QLabel("X max:")
+        control_layout.addWidget(self.xmax_label, 1, 2)
+        self.xmax_input = QLineEdit("10")
+        control_layout.addWidget(self.xmax_input, 1, 3)
+        self.plot_btn = QPushButton("Построить график")
+        self.plot_btn.setFixedHeight(36)
+        self.plot_btn.setMinimumWidth(140)
+        self.plot_btn.setStyleSheet("background-color:#5468ff; color:#fff; font-weight:bold;")
+        self.plot_btn.clicked.connect(self.plot_function)
+        control_layout.addWidget(self.plot_btn, 2, 0, 1, 4)
+        self.graph_canvas = GraphingCalculator(self)
+        self.graph_result = QTextEdit()
+        self.graph_result.setReadOnly(True)
+        self.graph_result.setMinimumHeight(60)
+        self.graph_result.setStyleSheet("background:#202030; border:1px solid #3c3c50; border-radius:6px; color:#e3e3f7; font-size:14px;")
+        layout.addWidget(control_group)
+        layout.addWidget(self.graph_canvas)
+        layout.addWidget(self.graph_result)
+        self.tabs.addTab(graph_tab, "Графики")
+
+    def create_history_tab(self):
+        history_tab = QWidget()
+        layout = QVBoxLayout(history_tab)
+        self.history_label = QLabel("История операций:")
+        layout.addWidget(self.history_label)
+        layout.addWidget(self.history_text)
+        btn_layout = QHBoxLayout()
+        self.clear_btn = QPushButton("Очистить историю")
+        self.clear_btn.setMinimumWidth(130)
+        self.clear_btn.clicked.connect(self.clear_history)
+        btn_layout.addWidget(self.clear_btn)
+        self.export_btn = QPushButton("Сохранить историю")
+        self.export_btn.setMinimumWidth(130)
+        self.export_btn.clicked.connect(self.export_history)
+        btn_layout.addWidget(self.export_btn)
+        btn_layout.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        layout.addLayout(btn_layout)
+        self.tabs.addTab(history_tab, "История")
+
+    def add_to_history(self, operation):
+        self.history.append(operation)
+        self.history_text.append(operation)
+        self.save_history()
+
+    def clear_history(self):
+        title = 'Очистка истории'
+        question = "Вы уверены, что хотите очистить всю историю операций?"
+        reply = QMessageBox.question(self, title, question,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.history = []
+            self.history_text.clear()
+            self.save_history()
+            self.status_bar.showMessage("История очищена")
+
+    def calculate_expression(self):
+        expr = self.math_expr_input.text()
+        if not expr:
+            self.status_bar.showMessage("Введите выражение для вычисления")
+            return
+        result, message = MathCalculator.calculate_expression(expr)
+        self.math_result.append(message)
+        if result is not None:
+            self.add_to_history(f"Вычисление: {message}")
+            self.status_bar.showMessage("Вычисление выполнено успешно")
+            self.math_expr_input.clear()
+            self.math_expr_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при вычислении")
+
+    def solve_equation(self):
+        equation = self.equation_input.text()
+        if not equation:
+            self.status_bar.showMessage("Введите уравнение для решения")
+            return
+        var = self.var_input.text().strip() or 'x'
+        solutions, message = MathCalculator.solve_equation(equation, var)
+        self.math_result.append(message)
+        if solutions is not None:
+            self.add_to_history(f"Решение уравнения: {message}")
+            self.status_bar.showMessage("Уравнение решено успешно")
+            self.equation_input.clear()
+            self.equation_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при решении уравнения")
+
+    def calculate_derivative(self):
+        func = self.func_input.text()
+        if not func:
+            self.status_bar.showMessage("Введите функцию для дифференцирования")
+            return
+        var = self.deriv_var_input.text().strip() or 'x'
+        derivative, message = MathCalculator.calculate_derivative(func, var)
+        self.math_result.append(message)
+        if derivative is not None:
+            self.add_to_history(f"Производная: {message}")
+            self.status_bar.showMessage("Производная вычислена успешно")
+            self.func_input.clear()
+            self.func_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при вычислении производной")
+
+    def calculate_integral(self):
+        func = self.func_input.text()
+        if not func:
+            self.status_bar.showMessage("Введите функцию для интегрирования")
+            return
+        var = self.deriv_var_input.text().strip() or 'x'
+        integral, message = MathCalculator.calculate_integral(func, var)
+        self.math_result.append(message)
+        if integral is not None:
+            self.add_to_history(f"Интеграл: {message}")
+            self.status_bar.showMessage("Интеграл вычислен успешно")
+            self.func_input.clear()
+            self.func_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при вычислении интеграла")
+
+    def solve_math_problem(self):
+        problem = self.problem_input.text()
+        if not problem:
+            self.status_bar.showMessage("Введите условие задачи")
+            return
+        result, message = MathCalculator.solve_math_problem(problem)
+        self.math_result.append(message)
+        if result is not None:
+            self.add_to_history(f"Решение задачи: {message}")
+            self.status_bar.showMessage("Задача решена")
+            self.problem_input.clear()
+            self.problem_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при решении задачи")
+
+    def calculate_molar_mass(self):
+        formula = self.formula_input.text()
+        if not formula:
+            self.status_bar.showMessage("Введите химическую формулу")
+            return
+        mass, message = ChemicalCalculator.calculate_molar_mass(formula)
+        self.chem_result.append(message)
+        if mass is not None:
+            self.add_to_history(f"Химия: {message}")
+            self.status_bar.showMessage("Молярная масса вычислена успешно")
+            self.formula_input.clear()
+            self.formula_input.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при вычислении молярной массы")
+
+    def balance_equation(self):
+        equation = self.equation_input_chem.text()
+        if not equation:
+            self.status_bar.showMessage("Введите химическое уравнение")
+            return
+        balanced, message = ChemicalCalculator.balance_equation(equation)
+        self.chem_result.append(message)
+        if balanced is not None:
+            self.add_to_history(f"Химия: {message}")
+            self.status_bar.showMessage("Уравнение сбалансировано")
+            self.equation_input_chem.clear()
+            self.equation_input_chem.setFocus()
+        else:
+            self.status_bar.showMessage("Ошибка при балансировке уравнения")
+
+    def plot_function(self):
+        func = self.func_input_graph.text()
+        if not func:
+            self.status_bar.showMessage("Введите функцию для построения графика")
+            return
+        try:
+            xmin = float(self.xmin_input.text())
+            xmax = float(self.xmax_input.text())
+            success, message = self.graph_canvas.plot_function(func, (xmin, xmax))
+            self.graph_result.append(message)
+            self.add_to_history(f"График: {func} на интервале [{xmin}, {xmax}]")
+            if success:
+                self.status_bar.showMessage("График построен успешно")
+            else:
+                self.status_bar.showMessage("Ошибка при построении графика")
+            self.func_input_graph.clear()
+            self.func_input_graph.setFocus()
+        except ValueError:
+            self.graph_result.append("Ошибка: Некорректные значения интервала")
+            self.status_bar.showMessage("Ошибка: Некорректные значения интервала")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    calculator = CalculatorApp()
+    calculator.show()
+    sys.exit(app.exec_())
